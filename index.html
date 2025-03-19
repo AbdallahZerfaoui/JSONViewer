@@ -1,0 +1,335 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSON Viewer</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #2d2d2d;
+            --border: #e0e0e0;
+            --primary: #4CAF50;
+            --error: #ff5252;
+        }
+
+        [data-theme="dark"] {
+            --bg: #1e1e1e;
+            --fg: #e0e0e0;
+            --border: #333333;
+            --primary: #00c853;
+        }
+
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', sans-serif;
+            height: 100vh;
+            transition: all 0.3s;
+        }
+
+        #container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            height: calc(100vh - 60px);
+        }
+
+        .panel {
+            padding: 20px;
+            border: none;
+            overflow: auto;
+        }
+
+        .resizer {
+            width: 10px;
+            background: var(--border);
+            cursor: col-resize;
+        }
+
+        .toolbar {
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            padding: 10px;
+            display: flex;
+            gap: 10px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .toolbar button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            background: var(--primary);
+            color: white;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .toolbar button:hover {
+            opacity: 0.9;
+        }
+
+        .CodeMirror {
+            height: 100%;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+        }
+
+        #tree-view {
+            padding: 20px;
+            border-left: 1px solid var(--border);
+        }
+
+        .node {
+            padding-left: 20px;
+            line-height: 1.5;
+        }
+
+        .error-line {
+            background: rgba(255, 82, 82, 0.2);
+        }
+
+        .error-message {
+            color: var(--error);
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body data-theme="light">
+    <div class="toolbar">
+        <button onclick="formatJSON()">Format</button>
+        <button onclick="minifyJSON()">Minify</button>
+        <button onclick="copyJSON()">Copy</button>
+        <button onclick="clearInput()">Clear</button>
+        <button onclick="toggleView()">Toggle View</button>
+        <button onclick="toggleTheme()">Toggle Theme</button>
+    </div>
+    
+    <div id="container">
+        <div class="panel" id="editor-panel"></div>
+        <div class="resizer" id="resizer"></div>
+        <div class="panel" id="viewer-panel">
+            <div id="tree-view"></div>
+            <pre id="text-view" style="display:none;"></pre>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/javascript/javascript.min.js"></script>
+    <script>
+        let currentView = 'tree';
+        let editor = CodeMirror(document.getElementById('editor-panel'), {
+            lineNumbers: true,
+            mode: 'application/json',
+            theme: 'default',
+            autofocus: true,
+            styleActiveLine: true
+        });
+
+        const resizer = document.getElementById('resizer');
+        let isResizing = false;
+
+        resizer.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            document.addEventListener('mousemove', resize);
+            document.addEventListener('mouseup', () => {
+                isResizing = false;
+            });
+        });
+
+        function resize(e) {
+            if (!isResizing) return;
+            const container = document.getElementById('container');
+            const newWidth = e.clientX;
+            container.style.gridTemplateColumns = `${newWidth}px 5px 1fr`;
+        }
+
+        editor.on('change', () => {
+            validateAndParse();
+            updateURL();
+        });
+
+        function validateAndParse() {
+            const value = editor.getValue();
+            clearErrors();
+            
+            try {
+                const json = JSON.parse(value);
+                renderTree(json);
+                document.getElementById('text-view').textContent = JSON.stringify(json, null, 2);
+                document.querySelector('.error-message').textContent = '';
+            } catch (e) {
+                const errorLine = getErrorLine(e);
+                highlightErrorLine(errorLine);
+                document.querySelector('.error-message').textContent = e.message;
+            }
+        }
+
+        function getErrorLine(error) {
+            const match = error.message.match(/at position (\d+)/);
+            if (!match) return 0;
+            
+            const index = parseInt(match[1]);
+            const content = editor.getValue().substring(0, index);
+            return content.split('\n').length;
+        }
+
+        function highlightErrorLine(line) {
+            const lineHandle = editor.getLineHandle(line - 1);
+            editor.addLineClass(lineHandle, 'background', 'error-line');
+        }
+
+        function clearErrors() {
+            editor.eachLine((line) => {
+                editor.removeLineClass(line, 'background', 'error-line');
+            });
+        }
+
+        function renderTree(data, parent=document.getElementById('tree-view')) {
+            parent.innerHTML = '';
+            
+            const renderNode = (data, parentElement) => {
+                const type = Array.isArray(data) ? 'array' : typeof data;
+                
+                for (const key in data) {
+                    if (!data.hasOwnProperty(key)) continue;
+                    
+                    const value = data[key];
+                    const valueType = Array.isArray(value) ? 'array' : typeof value;
+                    const isComplex = valueType === 'object' || valueType === 'array';
+                    
+                    const node = document.createElement('div');
+                    node.className = 'node';
+                    
+                    const toggle = document.createElement('i');
+                    toggle.className = `fas ${isComplex ? 'fa-caret-right' : 'fa-file'}`;
+                    toggle.style.marginRight = '8px';
+                    toggle.style.cursor = isComplex ? 'pointer' : 'default';
+                    
+                    const keyElement = document.createElement('span');
+                    keyElement.style.color = '#800080';
+                    keyElement.textContent = `${key}: `;
+                    
+                    const typeIndicator = document.createElement('span');
+                    typeIndicator.style.color = '#888';
+                    typeIndicator.textContent = valueType === 'array' ? '[]' : '{}';
+                    
+                    const valueElement = document.createElement('span');
+                    valueElement.style.color = getValueColor(value);
+                    valueElement.textContent = isComplex ? '' : JSON.stringify(value);
+                    
+                    node.appendChild(toggle);
+                    node.appendChild(keyElement);
+                    node.appendChild(typeIndicator);
+                    node.appendChild(valueElement);
+                    
+                    if (isComplex) {
+                        const children = document.createElement('div');
+                        children.className = 'children';
+                        children.style.display = 'none';
+                        node.appendChild(children);
+                        
+                        toggle.addEventListener('click', () => {
+                            children.style.display = children.style.display === 'none' ? 'block' : 'none';
+                            toggle.className = children.style.display === 'none' ? 'fas fa-caret-right' : 'fas fa-caret-down';
+                        });
+                    }
+                    
+                    parentElement.appendChild(node);
+                    
+                    if (isComplex) {
+                        renderNode(value, node.querySelector('.children'));
+                    }
+                }
+            };
+            
+            renderNode(data, parent);
+        }
+
+        function getValueColor(value) {
+            const type = typeof value;
+            switch(type) {
+                case 'string': return '#2a00ff';
+                case 'number': return '#008000';
+                case 'boolean': return '#ff0000';
+                case 'object': return '#800080';
+                default: return '#000';
+            }
+        }
+
+        function formatJSON() {
+            try {
+                const json = JSON.parse(editor.getValue());
+                editor.setValue(JSON.stringify(json, null, 2));
+            } catch (e) {}
+        }
+
+        function minifyJSON() {
+            try {
+                const json = JSON.parse(editor.getValue());
+                editor.setValue(JSON.stringify(json));
+            } catch (e) {}
+        }
+
+        function copyJSON() {
+            navigator.clipboard.writeText(editor.getValue()).then(() => {
+                alert('Copied to clipboard!');
+            });
+        }
+
+        function clearInput() {
+            editor.setValue('');
+        }
+
+        function toggleView() {
+            const treeView = document.getElementById('tree-view');
+            const textView = document.getElementById('text-view');
+            
+            if (currentView === 'tree') {
+                treeView.style.display = 'none';
+                textView.style.display = 'block';
+                currentView = 'text';
+            } else {
+                treeView.style.display = 'block';
+                textView.style.display = 'none';
+                currentView = 'tree';
+            }
+        }
+
+        function toggleTheme() {
+            const body = document.body;
+            body.setAttribute('data-theme', body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+            localStorage.setItem('theme', body.getAttribute('data-theme'));
+        }
+
+        function updateURL() {
+            try {
+                const json = JSON.parse(editor.getValue());
+                const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(json))));
+                window.history.replaceState({}, '', `#${encoded}`);
+            } catch (e) {}
+        }
+
+        function loadFromURL() {
+            const hash = window.location.hash.slice(1);
+            if (!hash) return;
+            
+            try {
+                const decoded = JSON.parse(decodeURIComponent(escape(atob(hash))));
+                editor.setValue(JSON.stringify(decoded, null, 2));
+            } catch (e) {}
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            document.body.setAttribute('data-theme', savedTheme);
+            loadFromURL();
+        });
+    </script>
+</body>
+</html>
+```
